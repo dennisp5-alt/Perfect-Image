@@ -109,7 +109,7 @@ public final class ImageEngine {
                 for(int i=0;i<256;i++){acc+=hist[i];if(acc>=samples*.99){high=i;break;}}
                 lo=low/255f;hi=high/255f;
                 float range=hi-lo;
-                strength=range<.05f?0:range<.80f?.32f:range<.92f?.18f:0;
+                strength=range<.05f?0:range<.65f?.38f:range<.84f?.30f:range<.94f?.19f:.08f;
             }
         }
     }
@@ -166,7 +166,11 @@ public final class ImageEngine {
                 }
             }
         }
-        if(s.mode==Mode.CLEAR)sharpen(dest,dw,dh,.20f);
+        // These modes must refine the saved bitmap as well as the reduced
+        // preview. Without this pass native-resolution JPEG/PNG exports
+        // previously bypassed nearly all mode-specific reconstruction.
+        if(s.mode==Mode.NATURAL)refineDetail(dest,dw,dh,.36f,11,32);
+        else if(s.mode==Mode.CLEAR)refineDetail(dest,dw,dh,.90f,22,54);
         return Bitmap.createBitmap(dest,dw,dh,Bitmap.Config.ARGB_8888);
     }
     private static int adjust(int r,int g,int b,Settings s,AutoStats a) {
@@ -186,19 +190,49 @@ public final class ImageEngine {
         rf=lum+(rf-lum)*sat;gf=lum+(gf-lum)*sat;bf=lum+(bf-lum)*sat;
         return (clip(Math.round(rf*255))<<16)|(clip(Math.round(gf*255))<<8)|clip(Math.round(bf*255));
     }
-    private static void sharpen(int[] px,int w,int h,float gain){
+    /**
+     * Luminance-only 3x3 edge-aware reconstruction.
+     * Suppresses noise amplification in nearly flat areas; clips extreme
+     * changes to avoid the colour fringes and ringing of RGB unsharp masks.
+     * The output is deterministic for full-resolution saves and previews.
+     */
+    private static void refineDetail(int[] px,int w,int h,float amount,
+                                     int maximumChange,int edgeLimit){
         if(w<3||h<3)return;
-        int[] original=px.clone();
-        for(int y=1;y<h-1;y++)for(int x=1;x<w-1;x++){
-            int i=y*w+x,p=original[i];
-            int r=Color.red(p),g=Color.green(p),b=Color.blue(p);
-            int t=original[i-w],d=original[i+w],l=original[i-1],z=original[i+1];
-            float dr=r-(Color.red(t)+Color.red(d)+Color.red(l)+Color.red(z))*.25f;
-            float dg=g-(Color.green(t)+Color.green(d)+Color.green(l)+Color.green(z))*.25f;
-            float db=b-(Color.blue(t)+Color.blue(d)+Color.blue(l)+Color.blue(z))*.25f;
-            if(Math.max(Math.abs(dr),Math.max(Math.abs(dg),Math.abs(db)))<4)continue;
-            px[i]=0xff000000|(clip(Math.round(r+dr*gain))<<16)|
-                (clip(Math.round(g+dg*gain))<<8)|clip(Math.round(b+db*gain));
+        int[] luma=new int[w*h];
+        for(int n=0;n<px.length;n++){
+            int p=px[n];
+            luma[n]=(54*Color.red(p)+183*Color.green(p)+19*Color.blue(p)+128)>>8;
+        }
+        for(int y=1;y<h-1;y++){
+            if((y&15)==0&&Thread.currentThread().isInterrupted())
+                throw new RuntimeException("Cancelled");
+            int base=y*w;
+            for(int x=1;x<w-1;x++){
+                int i=base+x;
+                int center=luma[i];
+                int blurred=(luma[i-w-1]+2*luma[i-w]+luma[i-w+1]
+                    +2*luma[i-1]+4*center+2*luma[i+1]
+                    +luma[i+w-1]+2*luma[i+w]+luma[i+w+1]+8)>>4;
+                int detail=center-blurred;
+                int magnitude=Math.abs(detail);
+                if(magnitude<3)continue; // Resist amplifying smooth-area noise
+                float strength=amount;
+                if(magnitude>edgeLimit)
+                    strength*=edgeLimit/(float)magnitude;
+                int delta=Math.round(detail*strength);
+                delta=Math.max(-maximumChange,Math.min(maximumChange,delta));
+                int p=px[i];
+                int r=Color.red(p),g=Color.green(p),b=Color.blue(p);
+                // Preserve highlight/shadow texture without harsh white halos.
+                int brightest=Math.max(r,Math.max(g,b));
+                int darkest=Math.min(r,Math.min(g,b));
+                if(delta>0&&brightest>244)delta=(delta*(255-brightest))/11;
+                if(delta<0&&darkest<11)delta=(delta*darkest)/11;
+                if(delta==0)continue;
+                px[i]=0xff000000|(clip(r+delta)<<16)|
+                      (clip(g+delta)<<8)|clip(b+delta);
+            }
         }
     }
 }
