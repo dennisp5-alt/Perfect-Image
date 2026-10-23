@@ -17,7 +17,7 @@ public class ZoomImageView extends ImageView {
     private float lastX,lastY, zoom=1;
     private boolean moving=false;
     private Bitmap original;
-    private boolean comparing=false, possibleSwipe=false;
+    private boolean showingOriginal=false, possibleSwipe=false;
     private float touchStartX,touchStartY;
     private OnPhotoSwipe swipeListener;
     private final Paint beforePaint=new Paint(Paint.ANTI_ALIAS_FLAG|Paint.FILTER_BITMAP_FLAG);
@@ -25,7 +25,8 @@ public class ZoomImageView extends ImageView {
     public interface OnPhotoSwipe{void onSwipe(int direction);}
     public void setOnPhotoSwipe(OnPhotoSwipe listener){swipeListener=listener;}
     public void setBeforeBitmap(Bitmap source){original=source;invalidate();}
-    public void setSplitComparison(boolean enabled){comparing=enabled;invalidate();}
+    /** Temporarily reveal the full unprocessed photo, preserving identical framing. */
+    public void setShowOriginal(boolean enabled){showingOriginal=enabled;invalidate();}
     public ZoomImageView(Context context){
         super(context);
         setScaleType(ScaleType.MATRIX);
@@ -66,27 +67,17 @@ public class ZoomImageView extends ImageView {
     }
     @Override protected void onDraw(Canvas canvas){
         super.onDraw(canvas);
-        if(!comparing||original==null||original.isRecycled()||getDrawable()==null)return;
-        int iw=getDrawable().getIntrinsicWidth(),ih=getDrawable().getIntrinsicHeight();
-        if(iw<=0||ih<=0)return;
-        Matrix m=new Matrix(transform);
-        m.preScale(iw/(float)original.getWidth(),ih/(float)original.getHeight());
-        float mid=getWidth()*.5f,d=getResources().getDisplayMetrics().density;
-        canvas.save();
-        canvas.clipRect(0,0,mid,getHeight());
-        canvas.drawBitmap(original,m,beforePaint);
-        canvas.restore();
-        dividerPaint.setColor(Color.WHITE);
-        dividerPaint.setStrokeWidth(2*d);
-        canvas.drawLine(mid,0,mid,getHeight(),dividerPaint);
-        dividerPaint.setColor(0xdb101820);
-        canvas.drawRoundRect(8*d,8*d,83*d,36*d,8*d,8*d,dividerPaint);
-        canvas.drawRoundRect(getWidth()-81*d,8*d,getWidth()-8*d,36*d,8*d,8*d,dividerPaint);
-        dividerPaint.setColor(Color.WHITE);
-        dividerPaint.setTextSize(12*d);
-        dividerPaint.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        canvas.drawText("BEFORE",16*d,27*d,dividerPaint);
-        canvas.drawText("AFTER",getWidth()-70*d,27*d,dividerPaint);
+        if(!showingOriginal||original==null||original.isRecycled()
+                ||getDrawable()==null)return;
+        // Reuse the rendered view matrix; convert source dimensions to preview
+        // dimensions so that the original exactly matches the edited framing.
+        int pw=getDrawable().getIntrinsicWidth();
+        int ph=getDrawable().getIntrinsicHeight();
+        if(pw<1||ph<1)return;
+        Matrix originalMatrix=new Matrix(transform);
+        originalMatrix.preScale(pw/(float)original.getWidth(),
+                ph/(float)original.getHeight());
+        canvas.drawBitmap(original,originalMatrix,beforePaint);
     }
     @Override public boolean onTouchEvent(MotionEvent event){
         scale.onTouchEvent(event);
