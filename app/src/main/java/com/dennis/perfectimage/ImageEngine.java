@@ -156,7 +156,7 @@ public final class ImageEngine {
                 for(int x=0;x<dw;x++){
                     float r=0,g=0,b=0;int idx=x*3;
                     for(int k=0;k<yt.index[y].length;k++){
-                        float[] row=cache.get(yt.index[y][k]),a=yt.weight[y][k];
+                        float[] row=cache.get(yt.index[y][k]); float a=yt.weight[y][k];
                         r+=a*row[idx];g+=a*row[idx+1];b+=a*row[idx+2];
                     }
                     int ri=s.linear?encode(clip01(r)):clip(Math.round(r*255));
