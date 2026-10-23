@@ -14,10 +14,12 @@ public final class ImageEngine {
         Mode mode=Mode.CLEAR;
         boolean linear=true, normalize=true, wb=true;
         int heat=0, brightness=0, contrast=0, saturation=0;
+        int renderStrength=70;
         Settings copy() {
             Settings s=new Settings(); s.mode=mode;s.linear=linear;
             s.normalize=normalize;s.wb=wb;s.heat=heat;s.brightness=brightness;
-            s.contrast=contrast;s.saturation=saturation;return s;
+            s.contrast=contrast;s.saturation=saturation;
+            s.renderStrength=renderStrength;return s;
         }
     }
     private static int clip(int n) {return n<0?0:Math.min(n,255);}
@@ -169,8 +171,16 @@ public final class ImageEngine {
         // These modes must refine the saved bitmap as well as the reduced
         // preview. Without this pass native-resolution JPEG/PNG exports
         // previously bypassed nearly all mode-specific reconstruction.
-        if(s.mode==Mode.NATURAL)refineDetail(dest,dw,dh,.36f,11,32);
-        else if(s.mode==Mode.CLEAR)refineDetail(dest,dw,dh,.90f,22,54);
+        float gain=Math.max(0,Math.min(100,s.renderStrength))/70f;
+        if(gain>0){
+            if(s.mode==Mode.NATURAL){
+                refineDetail(dest,dw,dh,.42f*gain,13,34);
+                localClarity(dest,dw,dh,.34f*gain,12);
+            }else if(s.mode==Mode.CLEAR){
+                refineDetail(dest,dw,dh,1.00f*gain,25,56);
+                localClarity(dest,dw,dh,.76f*gain,22);
+            }
+        }
         return Bitmap.createBitmap(dest,dw,dh,Bitmap.Config.ARGB_8888);
     }
     private static int adjust(int r,int g,int b,Settings s,AutoStats a) {
@@ -189,6 +199,89 @@ public final class ImageEngine {
         float sat=1+s.saturation/100f;
         rf=lum+(rf-lum)*sat;gf=lum+(gf-lum)*sat;bf=lum+(bf-lum)*sat;
         return (clip(Math.round(rf*255))<<16)|(clip(Math.round(gf*255))<<8)|clip(Math.round(bf*255));
+    }
+    /**
+     * Mid-frequency, near O(N) local-contrast processing. The v0.3 pipeline
+     * only sharpened 3x3 details, most of which vanished at fit-screen scale.
+     * This pass adds controlled contrast to structures visible at screen size.
+     *
+     * Two running box filters use byte grayscale arrays and an O(width) vertical
+     * accumulator rather than a memory-heavy integral image. The correction
+     * is luminance-only to avoid colour fringing and channel-dependent halos.
+     */
+    private static void localClarity(int[] px,int w,int h,float amount,int limit){
+        if(w<5||h<5||amount<=0)return;
+        int rad=Math.max(4,Math.min(22,Math.min(w,h)/105));
+        byte[] luminance=new byte[w*h];
+        byte[] horizontal=new byte[w*h];
+        for(int y=0;y<h;y++){
+            if((y&31)==0&&Thread.currentThread().isInterrupted())
+                throw new RuntimeException("Cancelled");
+            int row=y*w;
+            int total=0;
+            for(int x=0;x<w;x++){
+                int p=px[row+x];
+                luminance[row+x]=(byte)((54*Color.red(p)
+                    +183*Color.green(p)+19*Color.blue(p)+128)>>8);
+            }
+            for(int x=0;x<=rad&&x<w;x++)total+=luminance[row+x]&255;
+            for(int x=0;x<w;x++){
+                int start=Math.max(0,x-rad),end=Math.min(w-1,x+rad);
+                if(x>0){
+                    int outgoing=x-rad-1,incoming=x+rad;
+                    if(outgoing>=0)total-=luminance[row+outgoing]&255;
+                    if(incoming<w)total+=luminance[row+incoming]&255;
+                }
+                horizontal[row+x]=(byte)((total+(end-start+1)/2)/(end-start+1));
+            }
+        }
+        int[] sums=new int[w];
+        for(int y=0;y<=rad&&y<h;y++){
+            int row=y*w;
+            for(int x=0;x<w;x++)sums[x]+=horizontal[row+x]&255;
+        }
+        for(int y=0;y<h;y++){
+            if((y&31)==0&&Thread.currentThread().isInterrupted())
+                throw new RuntimeException("Cancelled");
+            if(y>0){
+                int outside=y-rad-1,inside=y+rad;
+                if(outside>=0){
+                    int row=outside*w;
+                    for(int x=0;x<w;x++)sums[x]-=horizontal[row+x]&255;
+                }
+                if(inside<h){
+                    int row=inside*w;
+                    for(int x=0;x<w;x++)sums[x]+=horizontal[row+x]&255;
+                }
+            }
+            int count=Math.min(h-1,y+rad)-Math.max(0,y-rad)+1;
+            int row=y*w;
+            for(int x=0;x<w;x++){
+                int i=row+x;
+                int lum=luminance[i]&255;
+                int local=(sums[x]+count/2)/count;
+                int difference=lum-local;
+                if(Math.abs(difference)<4)continue;
+                // Detail gain gently decays on extreme boundaries to prevent halos.
+                float attenuation=Math.min(1f,40f/Math.abs(difference));
+                int delta=Math.round(difference*amount*.75f*attenuation);
+                delta=Math.max(-limit,Math.min(limit,delta));
+                if(delta==0)continue;
+                int p=px[i];
+                int r=Color.red(p),g=Color.green(p),b=Color.blue(p);
+                // Highlight and deep-shadow protection.
+                if(delta>0){
+                    int max=Math.max(r,Math.max(g,b));
+                    if(max>246)delta=delta*(255-max)/9;
+                }else{
+                    int min=Math.min(r,Math.min(g,b));
+                    if(min<9)delta=delta*min/9;
+                }
+                if(delta==0)continue;
+                px[i]=0xff000000|(clip(r+delta)<<16)|
+                    (clip(g+delta)<<8)|clip(b+delta);
+            }
+        }
     }
     /**
      * Luminance-only 3x3 edge-aware reconstruction.
