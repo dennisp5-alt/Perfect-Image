@@ -1,6 +1,9 @@
 package com.dennis.perfectimage;
 
 import android.app.Activity;
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.view.MotionEvent;
 import android.app.AlertDialog;
 import android.content.ContentResolver;
 import android.content.ContentValues;
@@ -38,7 +41,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 public class MainActivity extends Activity {
-    private static final int PICK=12, PICK_FOLDER=13;
+    private static final int PICK=12, PICK_FOLDER=13, GALLERY_PERMISSION=14;
     private final ImageEngine.Settings settings=new ImageEngine.Settings();
     private final Handler ui=new Handler(Looper.getMainLooper());
     private final ExecutorService executor=Executors.newSingleThreadExecutor();
@@ -59,7 +62,6 @@ public class MainActivity extends Activity {
     }
     private final ArrayList<Uri> photos=new ArrayList<>();
     private int position=-1;
-    private boolean comparing=false;
     private TextView counter;
     private Button compareButton;
     @Override public void onCreate(Bundle state){
@@ -84,7 +86,8 @@ public class MainActivity extends Activity {
         LinearLayout top=new LinearLayout(this);top.setGravity(Gravity.CENTER_VERTICAL);
         TextView title=label("PERFECT IMAGE",19);title.setPadding(dp(14),0,0,0);
         top.addView(title,new LinearLayout.LayoutParams(0,dp(52),1));
-        top.addView(button("Photos",()->choosePhoto()));
+        top.addView(button("Gallery",()->showGallery()));
+        top.addView(button("Pick",()->choosePhoto()));
         top.addView(button("Save",()->save(false,false)));
         root.addView(top);
         image=new ZoomImageView(this);
@@ -96,10 +99,22 @@ public class MainActivity extends Activity {
         nav.addView(button("‹",()->nextPhoto(-1)),new LinearLayout.LayoutParams(0,dp(48),1));
         counter=label("No photos",12);counter.setGravity(Gravity.CENTER);
         nav.addView(counter,new LinearLayout.LayoutParams(0,dp(48),2));
-        compareButton=button("Compare",()->{
-            comparing=!comparing;
-            image.setSplitComparison(comparing);
-            compareButton.setText(comparing?"Split ON":"Compare");
+        compareButton=button("Hold original",()->{});
+        // Consume all button touch events; the original disappears immediately
+        // on lifting, dragging out of the control, or cancelling.
+        compareButton.setOnTouchListener((v,e)->{
+            switch(e.getActionMasked()){
+                case MotionEvent.ACTION_DOWN:
+                    image.setShowOriginal(true);
+                    compareButton.setPressed(true);
+                    return true;
+                case MotionEvent.ACTION_CANCEL:
+                case MotionEvent.ACTION_UP:
+                    image.setShowOriginal(false);
+                    compareButton.setPressed(false);
+                    return true;
+                default:return true;
+            }
         });
         nav.addView(compareButton,new LinearLayout.LayoutParams(0,dp(48),3));
         nav.addView(button("›",()->nextPhoto(1)),new LinearLayout.LayoutParams(0,dp(48),1));
@@ -160,6 +175,48 @@ public class MainActivity extends Activity {
             }
         });
         row.addView(bar);controls.addView(row);
+    }
+    private void showGallery(){
+        if(Build.VERSION.SDK_INT>=34){
+            if(checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES)!=
+                    PackageManager.PERMISSION_GRANTED &&
+               checkSelfPermission(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)!=
+                    PackageManager.PERMISSION_GRANTED){
+                requestPermissions(new String[]{
+                    Manifest.permission.READ_MEDIA_IMAGES,
+                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED},
+                    GALLERY_PERMISSION);
+                return;
+            }
+        }else if(Build.VERSION.SDK_INT>=33){
+            if(checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES)!=
+                    PackageManager.PERMISSION_GRANTED){
+                requestPermissions(new String[]{Manifest.permission.READ_MEDIA_IMAGES},
+                    GALLERY_PERMISSION);
+                return;
+            }
+        }else if(checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE)!=
+                PackageManager.PERMISSION_GRANTED){
+            requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE},
+                GALLERY_PERMISSION);
+            return;
+        }
+        GalleryPicker.open(this,(queue,index)->{
+            photos.clear();photos.addAll(queue);position=index;
+            open(photos.get(position));
+        });
+    }
+    @Override public void onRequestPermissionsResult(int requestCode,
+            String[] perms,int[] grants){
+        super.onRequestPermissionsResult(requestCode,perms,grants);
+        if(requestCode==GALLERY_PERMISSION){
+            boolean allowed=false;
+            for(int grant:grants)if(grant==PackageManager.PERMISSION_GRANTED)allowed=true;
+            if(allowed)showGallery();
+            else new AlertDialog.Builder(this)
+                .setMessage("To swipe through your whole gallery, allow photo access. You can still use Pick to select several pictures or Folder to browse one folder.")
+                .setPositiveButton("OK",null).show();
+        }
     }
     private void choosePhoto(){
         Intent i;
@@ -239,6 +296,7 @@ public class MainActivity extends Activity {
     }
     private void open(Uri uri){
         opening=true;
+        image.setShowOriginal(false);
         image.setBeforeBitmap(null);
         image.setImageBitmap(null);
         if(counter!=null)counter.setText(photos.isEmpty()?"Single photo":
