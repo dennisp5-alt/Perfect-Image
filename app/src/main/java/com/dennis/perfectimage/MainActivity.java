@@ -41,7 +41,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 public class MainActivity extends Activity {
-    private static final int PICK=12, PICK_FOLDER=13, GALLERY_PERMISSION=14;
+    private static final int PICK=12, PICK_FOLDER=13, GALLERY_PERMISSION=14, PICK_CONTINUE_PERMISSION=15;
     private final ImageEngine.Settings settings=new ImageEngine.Settings();
     private final Handler ui=new Handler(Looper.getMainLooper());
     private final ExecutorService executor=Executors.newSingleThreadExecutor();
@@ -64,6 +64,8 @@ public class MainActivity extends Activity {
     private int position=-1;
     private TextView counter;
     private Button compareButton;
+    private Uri pendingPickedUri;
+    private boolean promptedForContinuation=false;
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
         getWindow().setStatusBarColor(0xff101010);
@@ -143,6 +145,7 @@ public class MainActivity extends Activity {
         addSlider("Brightness",v->settings.brightness=v);
         addSlider("Contrast",v->settings.contrast=v);
         addSlider("Saturation",v->settings.saturation=v);
+        addRenderStrengthSlider();
         LinearLayout actions=new LinearLayout(this);
         actions.addView(button("Save rendered PNG",()->save(true,false)),
             new LinearLayout.LayoutParams(0,dp(53),1));
@@ -176,6 +179,63 @@ public class MainActivity extends Activity {
         });
         row.addView(bar);controls.addView(row);
     }
+    private void addRenderStrengthSlider(){
+        LinearLayout item=new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        TextView title=label("Rendering strength: "+settings.renderStrength+"%",12);
+        title.setGravity(Gravity.CENTER);
+        item.addView(title);
+        SeekBar bar=new SeekBar(this);bar.setMax(100);bar.setProgress(settings.renderStrength);
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
+            @Override public void onStartTrackingTouch(SeekBar b){}
+            @Override public void onStopTrackingTouch(SeekBar b){renderPreview();}
+            @Override public void onProgressChanged(SeekBar b,int value,boolean user){
+                if(!user)return;
+                settings.renderStrength=value;
+                title.setText("Rendering strength: "+value+"%");
+            }
+        });
+        item.addView(bar);
+        controls.addView(item);
+    }
+    private boolean hasFullGalleryAccess(){
+        return checkSelfPermission(Build.VERSION.SDK_INT>=33?
+            Manifest.permission.READ_MEDIA_IMAGES:
+            Manifest.permission.READ_EXTERNAL_STORAGE)==PackageManager.PERMISSION_GRANTED;
+    }
+    private void continuePickedPhoto(Uri picked){
+        if(picked==null||!hasFullGalleryAccess())return;
+        final String key=picked.toString();
+        status.setText("Finding selected photo's album…");
+        GalleryPicker.continueFromPicked(this,picked,(queue,index)->{
+            if(pendingPickedUri==null||!key.equals(pendingPickedUri.toString()))return;
+            photos.clear();photos.addAll(queue);position=index;
+            counter.setText((position+1)+" / "+photos.size());
+            status.setText("Album ready · swipe for next photo");
+            // Reuse selected image; next swipe uses the correctly matched MediaStore URI.
+        },reason->{
+            if(pendingPickedUri!=null&&key.equals(pendingPickedUri.toString()))
+                status.setText("Swipe selected photos, or open Gallery to browse albums");
+        });
+    }
+    private void offerPickContinuation(){
+        if(pendingPickedUri==null)return;
+        if(hasFullGalleryAccess()){continuePickedPhoto(pendingPickedUri);return;}
+        if(promptedForContinuation)return;
+        promptedForContinuation=true;
+        new AlertDialog.Builder(this).setTitle("Continue through this folder?")
+            .setMessage("To swipe through other photos after using Pick, Perfect Image needs access to the rest of your photo library. Choose Allow all photos. Otherwise, swipe is limited to the photos you selected.")
+            .setPositiveButton("Allow photo access",(dialog,which)->{
+                if(Build.VERSION.SDK_INT>=34)requestPermissions(new String[]{
+                    Manifest.permission.READ_MEDIA_IMAGES,
+                    Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED},
+                    PICK_CONTINUE_PERMISSION);
+                else requestPermissions(new String[]{Build.VERSION.SDK_INT>=33?
+                    Manifest.permission.READ_MEDIA_IMAGES:
+                    Manifest.permission.READ_EXTERNAL_STORAGE},PICK_CONTINUE_PERMISSION);
+            })
+            .setNegativeButton("Only selected",null).show();
+    }
     private void showGallery(){
         if(Build.VERSION.SDK_INT>=34){
             if(checkSelfPermission(Manifest.permission.READ_MEDIA_IMAGES)!=
@@ -202,6 +262,7 @@ public class MainActivity extends Activity {
             return;
         }
         GalleryPicker.open(this,(queue,index)->{
+            pendingPickedUri=null;
             photos.clear();photos.addAll(queue);position=index;
             open(photos.get(position));
         });
@@ -209,6 +270,12 @@ public class MainActivity extends Activity {
     @Override public void onRequestPermissionsResult(int requestCode,
             String[] perms,int[] grants){
         super.onRequestPermissionsResult(requestCode,perms,grants);
+        if(requestCode==PICK_CONTINUE_PERMISSION){
+            if(hasFullGalleryAccess()&&pendingPickedUri!=null)
+                continuePickedPhoto(pendingPickedUri);
+            else status.setText("Only selected photos accessible · use Gallery or Folder");
+            return;
+        }
         if(requestCode==GALLERY_PERMISSION){
             boolean allowed=false;
             for(int grant:grants)if(grant==PackageManager.PERMISSION_GRANTED)allowed=true;
@@ -259,6 +326,9 @@ public class MainActivity extends Activity {
         if(single!=null&&!chosen.contains(single))chosen.add(single);
         if(chosen.isEmpty())return;
         photos.clear();photos.addAll(chosen);position=0;open(photos.get(0));
+        pendingPickedUri=chosen.size()==1?chosen.get(0):null;
+        promptedForContinuation=false;
+        if(chosen.size()==1)offerPickContinuation();
     }
     private void readFolder(Uri folder){
         ArrayList<String> names=new ArrayList<>(), ids=new ArrayList<>();
