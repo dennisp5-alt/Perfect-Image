@@ -48,6 +48,15 @@ public class MainActivity extends Activity {
     private TextView status;
     private LinearLayout controls;
     private int generation=0;
+    private volatile boolean opening=false;
+    private final java.util.concurrent.atomic.AtomicInteger activeExports=
+        new java.util.concurrent.atomic.AtomicInteger();
+    private final ArrayList<Bitmap> deferredRecycling=new ArrayList<>();
+    private void releaseOldImages(){
+        if(activeExports.get()!=0)return;
+        for(Bitmap bmp:deferredRecycling)if(bmp!=null&&!bmp.isRecycled())bmp.recycle();
+        deferredRecycling.clear();
+    }
     private final ArrayList<Uri> photos=new ArrayList<>();
     private int position=-1;
     private boolean comparing=false;
@@ -229,6 +238,7 @@ public class MainActivity extends Activity {
         position=next;open(photos.get(next));
     }
     private void open(Uri uri){
+        opening=true;
         image.setBeforeBitmap(null);
         image.setImageBitmap(null);
         if(counter!=null)counter.setText(photos.isEmpty()?"Single photo":
@@ -248,11 +258,18 @@ public class MainActivity extends Activity {
                 ui.post(()->{
                     if(id!=generation){decoded.recycle();return;}
                     Bitmap old=original;original=decoded;
+                    opening=false;
                     image.setBeforeBitmap(decoded);
-                    if(old!=null&&old!=preview)old.recycle();
+                    if(old!=null&&old!=preview){
+                        if(activeExports.get()>0)deferredRecycling.add(old);
+                        else old.recycle();
+                    }
+                    releaseOldImages();
                     renderPreview();
                 });
-            }catch(Exception ex){ui.post(()->status.setText("Open failed: "+ex.getMessage()));}
+            }catch(Exception ex){ui.post(()->{
+                if(id==generation){opening=false;status.setText("Open failed: "+ex.getMessage());}
+            });}
         });
     }
     private void renderPreview(){
@@ -282,7 +299,7 @@ public class MainActivity extends Activity {
         });
     }
     private void save(boolean png,boolean visible){
-        if(original==null){status.setText("Open a photo first");return;}
+        if(original==null||opening){status.setText("Photo is still opening");return;}
         if(visible){
             Bitmap crop=image.saveVisibleView();
             if(crop!=null)executor.submit(()->saveBitmap(crop,png,true,true));
@@ -291,11 +308,16 @@ public class MainActivity extends Activity {
         final Bitmap source=original;
         final ImageEngine.Settings snap=settings.copy();
         status.setText("Saving full rendered image…");
+        activeExports.incrementAndGet();
         executor.submit(()->{
             try{
                 Bitmap out=ImageEngine.render(source,source.getWidth(),source.getHeight(),snap);
                 saveBitmap(out,png,false,true);
             }catch(Exception ex){ui.post(()->status.setText("Save failed: "+ex.getMessage()));}
+            finally{
+                activeExports.decrementAndGet();
+                ui.post(this::releaseOldImages);
+            }
         });
     }
     private void saveBitmap(Bitmap bmp,boolean png,boolean visible,boolean release){
